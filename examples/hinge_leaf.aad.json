@@ -1,0 +1,11 @@
+{
+  "name": "Hinge leaf",
+  "units": "mm",
+  "features": [
+    { "id": "s1", "type": "sketch", "plane": "XY",
+      "entities": [ { "type": "rect", "x0": 0, "y0": 0, "x1": 40, "y1": 100 } ] },
+    { "id": "e1", "type": "extrude", "sketch": "s1", "distance": 3, "op": "new" },
+    { "id": "h1", "type": "hole", "on": "e1", "diameter": 4,
+      "at": [[5, 5], [35, 5], [5, 95], [35, 95]] }
+  ]
+}
