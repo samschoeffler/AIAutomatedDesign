@@ -1,0 +1,9 @@
+# The workspace: one folder per part of the app (see docs/SPEC.md).
+# Only aad-model has real code so far; the others are placeholders.
+[workspace]
+resolver = "2"
+members = ["crates/aad-model", "crates/aad-bridge", "crates/aad-app"]
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
