@@ -1,0 +1,12 @@
+[package]
+name = "aad-kernel"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "Turns a feature list into a solid, using the Truck B-rep kernel."
+
+[dependencies]
+aad-model = { path = "../aad-model" }
+truck-modeling = "0.6"
+truck-shapeops = "0.4"
+truck-meshalgo = "0.4"

@@ -1,0 +1,19 @@
+{
+  "name": "Demo bracket",
+  "units": "mm",
+  "features": [
+    { "id": "s1", "type": "sketch", "plane": "XY",
+      "entities": [ { "type": "rect", "x0": 0, "y0": 0, "x1": 40, "y1": 100 },
+                    { "type": "rect", "x0": 10, "y0": 30, "x1": 30, "y1": 45 } ] },
+    { "id": "e1", "type": "extrude", "sketch": "s1", "distance": 3 },
+    { "id": "s2", "type": "sketch", "plane": "XY",
+      "entities": [ { "type": "circle", "cx": 20, "cy": 75, "r": 8 } ] },
+    { "id": "j1", "type": "extrude", "sketch": "s2", "distance": 12, "op": "join" },
+    { "id": "s3", "type": "sketch", "plane": "XY",
+      "entities": [ { "type": "rect", "x0": 5, "y0": 55, "x1": 35, "y1": 60 } ] },
+    { "id": "c1", "type": "extrude", "sketch": "s3", "distance": 1.5, "op": "cut" },
+    { "id": "h1", "type": "hole", "on": "e1", "diameter": 4,
+      "at": [[5, 5], [35, 5], [5, 95], [35, 95]] },
+    { "id": "h2", "type": "hole", "on": "j1", "diameter": 8, "at": [[20, 75]], "depth": 9 }
+  ]
+}

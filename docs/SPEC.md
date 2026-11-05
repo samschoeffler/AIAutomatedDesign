@@ -90,8 +90,8 @@ instead of a broken model.
 
 ## Build phases
 
-1. **Model.** Feature list types, JSON load/save, validation. *(skeleton started)*
-2. **Kernel.** Sketch → extrude/cut/hole with Truck; STL + STEP export.
+1. **Model.** Feature list types, JSON load/save, validation. *(done for sketch / extrude / hole; other v1 feature types arrive with the phases that need them)*
+2. **Kernel.** Sketch → extrude/cut/hole with Truck; STL + STEP export. *(done: `aad-kernel`, `aad-export`; try it with `cargo run -p aad-export --example export -- examples/bracket.aad.json`)*
 3. **Bridge + control.** MCP stdio bridge, localhost protocol, propose/accept.
 4. **Window.** Viewer, feature tree with number editing, ghost previews.
 5. **Render tool.** Offscreen render to PNG for Claude.
@@ -109,6 +109,15 @@ instead of a broken model.
   and after, or only the after?
 - **Hole sizes:** which clearance table for M3/M4/M5 and #10 / 1/4 in screws?
 - **Hex bore tolerance** for 1/2 in hex shaft (printed vs machined)?
+- **Joins that Truck can't fuse.** Truck's booleans fail on shared flat faces, and
+  since every sketch sits on an origin plane, a joined boss almost always shares the
+  plate's bottom face. For now such a join stays as an overlapping piece of the same
+  body (fine for STL and printing; STEP gets two overlapping solids; `volume` counts the
+  overlap twice). Options: sketch planes with an offset, a fix upstream in Truck, or
+  another kernel. The `monstertruck` fork was tried (Nov 2026): it handles flush cuts
+  but still fails these joins, and returns an empty solid for a cut that misses.
+- **Cuts flush with a side face** (a notch at the plate's edge) still fail in Truck;
+  the error tells Claude to overlap the edge or stop short of it.
 
 ## Setting up Rust on Windows (you don't have it yet)
 

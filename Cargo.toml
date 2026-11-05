@@ -1,9 +1,14 @@
 # The workspace: one folder per part of the app (see docs/SPEC.md).
-# Only aad-model has real code so far; the others are placeholders.
+# aad-bridge and aad-app are still placeholders.
 [workspace]
 resolver = "2"
-members = ["crates/aad-model", "crates/aad-bridge", "crates/aad-app"]
+members = ["crates/aad-model", "crates/aad-kernel", "crates/aad-export", "crates/aad-bridge", "crates/aad-app"]
 
 [workspace.package]
 edition = "2021"
 license = "MIT"
+
+# The geometry kernel is very slow unoptimised, so build dependencies with
+# optimisation even in debug builds. Our own code stays quick to compile.
+[profile.dev.package."*"]
+opt-level = 2
