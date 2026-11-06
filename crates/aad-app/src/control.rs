@@ -5,6 +5,7 @@
 //! (validated and built) before the user ever sees it, so a bad AI step comes straight
 //! back to Claude as an error instead of reaching the prompt.
 
+use crate::say::{say, say_line};
 use aad_model::{Design, Feature};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -253,9 +254,10 @@ fn propose(app: &Shared, args: ProposeArgs) -> Result<Value, String> {
     if a.design != base {
         return Err("the design changed while this proposal was being checked; call get_design and propose again".into());
     }
+    let mut text = String::new();
     for p in a.proposals.iter_mut().filter(|p| p.status == Status::Pending) {
         p.status = Status::Superseded;
-        println!("\n(proposal #{} was replaced by a newer one)", p.id);
+        text.push_str(&format!("\n(proposal #{} was replaced by a newer one)\n", p.id));
     }
     let id = a.proposals.len() as u32 + 1;
     let proposal = Proposal {
@@ -267,8 +269,11 @@ fn propose(app: &Shared, args: ProposeArgs) -> Result<Value, String> {
         measurements: measurements.clone(),
         user_note: String::new(),
     };
-    print_proposal(&proposal);
+    text.push_str(&describe_proposal(&proposal));
     a.proposals.push(proposal);
+    // Never print while holding the lock (see say.rs).
+    drop(a);
+    say(text);
     Ok(json!({
         "proposal_id": id,
         "status": Status::Pending,
@@ -279,31 +284,29 @@ fn propose(app: &Shared, args: ProposeArgs) -> Result<Value, String> {
     }))
 }
 
-/// Show a new proposal in the console, ending with the accept/reject prompt.
-fn print_proposal(p: &Proposal) {
+/// How a new proposal looks in the console, ending with the accept/reject prompt.
+fn describe_proposal(p: &Proposal) -> String {
     let list = |ids: &[String]| if ids.is_empty() { "-".to_string() } else { ids.join(", ") };
-    println!();
-    println!("── Claude proposes a change (#{}) ──", p.id);
+    let mut t = format!("\n── Claude proposes a change (#{}) ──\n", p.id);
     if !p.description.is_empty() {
-        println!("   {}", p.description);
+        t.push_str(&format!("   {}\n", p.description));
     }
-    println!(
-        "   added: {}   changed: {}   removed: {}",
+    t.push_str(&format!(
+        "   added: {}   changed: {}   removed: {}\n",
         list(&p.changes.added),
         list(&p.changes.changed),
         list(&p.changes.removed)
-    );
+    ));
     if p.changes.renamed {
-        println!("   new name: {:?}", p.design.name);
+        t.push_str(&format!("   new name: {:?}\n", p.design.name));
     }
     if let Some(size) = p.measurements["bounding_box_mm"]["size"].as_array() {
         let s: Vec<String> = size.iter().map(|v| format!("{:.1}", v.as_f64().unwrap_or(0.0))).collect();
-        println!("   size {} mm, volume {:.0} mm³", s.join(" x "), p.measurements["volume_mm3"].as_f64().unwrap_or(0.0));
+        let volume = p.measurements["volume_mm3"].as_f64().unwrap_or(0.0);
+        t.push_str(&format!("   size {} mm, volume {volume:.0} mm³\n", s.join(" x ")));
     }
-    println!("   [a]ccept / [r]eject (add a reason for Claude: r too thin)");
-    print!("> ");
-    use std::io::Write;
-    let _ = std::io::stdout().flush();
+    t.push_str("   [a]ccept / [r]eject (add a reason for Claude: r too thin)\n> ");
+    t
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -407,7 +410,7 @@ fn export(app: &Shared, args: ExportArgs) -> Result<Value, String> {
         Format::Stl => aad_export::write_stl(&part, &path)?,
         Format::Step => aad_export::write_step(&part, &design.name, &path)?,
     }
-    println!("\n(exported {})", path.display());
+    say_line(format!("\n(exported {})", path.display()));
     Ok(json!({ "path": path, "measurements": measurements(&part) }))
 }
 
@@ -513,6 +516,26 @@ mod tests {
         let s = handle(&app, "proposal_status", json!({ "wait_seconds": 10 })).expect("ok");
         assert_eq!(s["status"], "accepted");
         user.join().expect("joins");
+    }
+
+    /// Regression: a frozen console (QuickEdit selection) used to hang every bridge call.
+    #[test]
+    fn a_frozen_console_does_not_block_claude() {
+        let app = shared(plate());
+        let frozen = crate::say::WRITING.lock().unwrap_or_else(|e| e.into_inner());
+        let (tx, rx) = std::sync::mpsc::channel();
+        let app2 = app.clone();
+        std::thread::spawn(move || {
+            let p = handle(&app2, "propose_features", json!({ "name": "Y", "description": "rename" }));
+            let s = handle(&app2, "proposal_status", json!({}));
+            let d = handle(&app2, "get_design", json!({}));
+            let _ = tx.send((p.is_ok(), s.is_ok(), d.is_ok()));
+        });
+        let answers = rx.recv_timeout(Duration::from_secs(30)).expect("bridge calls finish while the console is frozen");
+        assert_eq!(answers, (true, true, true));
+        // The console (here, this test) can still take the lock to accept.
+        assert!(lock(&app).accept().is_ok());
+        drop(frozen);
     }
 
     #[test]
