@@ -16,12 +16,21 @@ dependencies = [
 name = "aad-app"
 version = "0.1.0"
 dependencies = [
+ "aad-export",
+ "aad-kernel",
+ "aad-link",
  "aad-model",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
 name = "aad-bridge"
 version = "0.1.0"
+dependencies = [
+ "aad-link",
+ "serde_json",
+]
 
 [[package]]
 name = "aad-export"
@@ -42,6 +51,14 @@ dependencies = [
  "truck-meshalgo",
  "truck-modeling",
  "truck-shapeops",
+]
+
+[[package]]
+name = "aad-link"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
