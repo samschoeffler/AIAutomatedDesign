@@ -2,7 +2,7 @@
 //! plus suppress, reorder, delete and add. It edits a copy of the design (the window's
 //! "draft"); the window decides when that copy becomes the real design.
 
-use aad_model::{BodyOp, Design, Feature, HoleDepth, Plane, Problem, SketchEntity};
+use aad_model::{BodyOp, Design, Feature, HoleDepth, Plane, Problem, Side, SketchEntity, SketchPlane};
 use eframe::egui;
 
 /// Something done to a whole feature, applied after the list is drawn.
@@ -55,6 +55,12 @@ pub fn show(ui: &mut egui::Ui, design: &mut Design, problems: &[Problem], claude
             add_sketch(design);
             ui.close();
         }
+        if let Some(on) = last_id(design, |f| matches!(f, Feature::Extrude { .. })) {
+            if ui.button(format!("Sketch on top of {on}")).clicked() {
+                add_sketch_on(design, on);
+                ui.close();
+            }
+        }
         if ui.button("Extrude").clicked() {
             add_extrude(design);
             ui.close();
@@ -104,13 +110,40 @@ fn header(ui: &mut egui::Ui, f: &mut Feature, i: usize, count: usize, claude_cha
 /// The feature's settings.
 fn body(ui: &mut egui::Ui, f: &mut Feature, before: &[Feature]) {
     match f {
-        Feature::Sketch { plane, entities, .. } => {
-            ui.horizontal(|ui| {
+        Feature::Sketch { plane, offset, entities, .. } => {
+            let last_extrude = before.iter().rev().find(|f| matches!(f, Feature::Extrude { .. })).map(|f| f.id().to_string());
+            ui.horizontal_wrapped(|ui| {
                 ui.label("Plane");
                 for p in [Plane::XY, Plane::XZ, Plane::YZ] {
-                    ui.selectable_value(plane, p, format!("{p:?}"));
+                    let chosen = *plane == SketchPlane::Origin(p);
+                    if ui.selectable_label(chosen, format!("{p:?}")).clicked() {
+                        *plane = SketchPlane::Origin(p);
+                    }
+                }
+                let on_face = matches!(plane, SketchPlane::Face { .. });
+                let face_button = ui
+                    .add_enabled(last_extrude.is_some(), egui::Button::selectable(on_face, "on a face"))
+                    .on_hover_text("Sit on the start or end face of an earlier extrude, and move with it")
+                    .on_disabled_hover_text("Needs an extrude earlier in the list");
+                if face_button.clicked() && !on_face {
+                    if let Some(on) = &last_extrude {
+                        *plane = SketchPlane::Face { on: on.clone(), side: Side::End };
+                    }
                 }
             });
+            if let SketchPlane::Face { on, side } = plane {
+                ui.horizontal(|ui| {
+                    ui.label("Face of");
+                    pick_id(ui, "face_of", on, before, |f| matches!(f, Feature::Extrude { .. }));
+                    ui.selectable_value(side, Side::Start, "start");
+                    ui.selectable_value(side, Side::End, "end");
+                });
+            }
+            ui.horizontal(|ui| {
+                number(ui, "Offset", offset);
+            })
+            .response
+            .on_hover_text("Moves the sketch this far along the plane's normal");
             let mut remove = None;
             for (k, e) in entities.iter_mut().enumerate() {
                 ui.push_id(k, |ui| {
@@ -242,8 +275,21 @@ fn add_sketch(design: &mut Design) {
     let id = fresh_id(design, "sketch");
     design.features.push(Feature::Sketch {
         id,
-        plane: Plane::XY,
+        plane: Plane::XY.into(),
+        offset: 0.0,
         entities: vec![SketchEntity::Rect { x0: 0.0, y0: 0.0, x1: 50.0, y1: 30.0 }],
+        suppressed: false,
+    });
+}
+
+/// A sketch on the end face of `extrude` (the top of a plate), with a circle in it.
+fn add_sketch_on(design: &mut Design, extrude: String) {
+    let id = fresh_id(design, "sketch");
+    design.features.push(Feature::Sketch {
+        id,
+        plane: SketchPlane::Face { on: extrude, side: Side::End },
+        offset: 0.0,
+        entities: vec![SketchEntity::Circle { cx: 10.0, cy: 10.0, r: 5.0 }],
         suppressed: false,
     });
 }
@@ -294,5 +340,7 @@ mod tests {
         add_extrude(&mut d);
         assert!(matches!(d.features[3], Feature::Extrude { op: BodyOp::Join, .. }));
         assert_eq!(d.features[3].id(), "extrude2");
+        add_sketch_on(&mut d, "extrude1".into());
+        assert!(d.validate().is_empty(), "{:?}", d.validate());
     }
 }

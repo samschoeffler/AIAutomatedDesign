@@ -125,8 +125,8 @@ fn a_shallow_pocket_leaves_a_floor() {
     assert_volume(&part, 12000.0 - 400.0);
 }
 
-/// A boss standing on the plate. Truck may not fuse it (they share the bottom face);
-/// then it's kept as an overlapping piece, and the shape is still right.
+/// A boss standing on the plate, sketched on XY so it shares the plate's bottom face.
+/// Truck can't fuse that as is; the join nudges the boss's start up inside the plate.
 #[test]
 fn join_adds_material() {
     let part = built(&format!(
@@ -136,9 +136,85 @@ fn join_adds_material() {
     ));
     assert_eq!(part.bodies.len(), 1);
     assert_box(&part, [0.0, 0.0, 0.0], [40.0, 100.0, 8.0]);
-    let boss = PI * 25.0;
-    let expected = if part.has_overlapping_pieces() { 12000.0 + boss * 8.0 } else { 12000.0 + boss * 5.0 };
-    assert_volume(&part, expected);
+    assert!(!part.has_overlapping_pieces(), "the boss is fused into the plate");
+    assert_volume(&part, 12000.0 + PI * 25.0 * 5.0);
+}
+
+/// A boss sketched on the plate's top face (its end face) or on an offset plane.
+#[test]
+fn a_boss_on_the_top_face_is_fused() {
+    for plane in [r#"{ "on": "e1", "side": "end" }"#, r#""XY", "offset": 3"#] {
+        let part = built(&format!(
+            r#"{PLATE},
+               {{ "id": "s2", "type": "sketch", "plane": {plane}, "entities": [ {{ "type": "circle", "cx": 20, "cy": 50, "r": 5 }} ] }},
+               {{ "id": "j1", "type": "extrude", "sketch": "s2", "distance": 5, "op": "join" }}"#
+        ));
+        assert_box(&part, [0.0, 0.0, 0.0], [40.0, 100.0, 8.0]);
+        assert!(!part.has_overlapping_pieces(), "fused ({plane})");
+        assert_volume(&part, 12000.0 + PI * 25.0 * 5.0);
+    }
+}
+
+/// On the start face, a negative distance goes out of the plate's bottom.
+#[test]
+fn a_boss_under_the_plate_from_its_start_face() {
+    let part = built(&format!(
+        r#"{PLATE},
+           {{ "id": "s2", "type": "sketch", "plane": {{ "on": "e1", "side": "start" }}, "entities": [ {{ "type": "rect", "x0": 10, "y0": 10, "x1": 30, "y1": 30 }} ] }},
+           {{ "id": "j1", "type": "extrude", "sketch": "s2", "distance": -4, "op": "join" }}"#
+    ));
+    assert_box(&part, [0.0, 0.0, -4.0], [40.0, 100.0, 3.0]);
+    assert!(!part.has_overlapping_pieces());
+    assert_volume(&part, 12000.0 + 400.0 * 4.0);
+}
+
+/// The boss follows the face it's on: a thicker plate lifts it.
+#[test]
+fn a_sketch_on_a_face_moves_with_it() {
+    let boss = r#",
+        { "id": "s2", "type": "sketch", "plane": { "on": "e1" }, "entities": [ { "type": "circle", "cx": 20, "cy": 50, "r": 5 } ] },
+        { "id": "j1", "type": "extrude", "sketch": "s2", "distance": 5, "op": "join" }"#;
+    let thick = PLATE.replace(r#""distance": 3"#, r#""distance": 10"#);
+    let part = built(&format!("{thick}{boss}"));
+    assert_box(&part, [0.0, 0.0, 0.0], [40.0, 100.0, 15.0]);
+}
+
+/// Half the boss hangs off the plate's edge. Nudging it down into the plate would leave a
+/// stub under the overhang, so it isn't nudged: no extra material appears.
+#[test]
+fn an_overhanging_boss_gets_no_stub() {
+    let part = built(&format!(
+        r#"{PLATE},
+           {{ "id": "s2", "type": "sketch", "plane": {{ "on": "e1" }}, "entities": [ {{ "type": "circle", "cx": 40, "cy": 50, "r": 5 }} ] }},
+           {{ "id": "j1", "type": "extrude", "sketch": "s2", "distance": 5, "op": "join" }}"#
+    ));
+    assert_box(&part, [0.0, 0.0, 0.0], [45.0, 100.0, 8.0]);
+    // A stub would add about 20 mm³ (half the circle, 0.5 mm deep): check tighter than 1%.
+    let (v, expected) = (part.volume(), 12000.0 + PI * 25.0 * 5.0);
+    assert!((v - expected).abs() < 5.0, "volume {v:.1}, expected {expected:.1}");
+}
+
+/// Holes and cuts work from a face plane too: a blind hole down into the boss's top.
+#[test]
+fn holes_in_a_boss_on_a_face() {
+    let part = built(&format!(
+        r#"{PLATE},
+           {{ "id": "s2", "type": "sketch", "plane": {{ "on": "e1" }}, "entities": [ {{ "type": "circle", "cx": 20, "cy": 50, "r": 5 }} ] }},
+           {{ "id": "j1", "type": "extrude", "sketch": "s2", "distance": 5, "op": "join" }},
+           {{ "id": "h1", "type": "hole", "on": "j1", "diameter": 4, "at": [[20, 50]], "depth": 2 }}"#
+    ));
+    assert_volume(&part, 12000.0 + PI * 25.0 * 5.0 - PI * 4.0 * 2.0);
+}
+
+/// An offset plane on XZ: sketch y is world Z, and the plane sits at world y = -10.
+#[test]
+fn offset_planes_work_on_every_axis() {
+    let part = built(
+        r#"{ "id": "s1", "type": "sketch", "plane": "XZ", "offset": 10, "entities": [ { "type": "rect", "x0": 0, "y0": 0, "x1": 10, "y1": 20 } ] },
+           { "id": "e1", "type": "extrude", "sketch": "s1", "distance": 5 }"#,
+    );
+    // XZ's normal is -Y, so offset 10 puts the plane at y = -10, and the extrude goes on to y = -15.
+    assert_box(&part, [0.0, -15.0, 0.0], [10.0, -10.0, 20.0]);
 }
 
 #[test]

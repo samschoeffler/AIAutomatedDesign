@@ -28,7 +28,11 @@ fn default_units() -> String {
 pub enum Feature {
     Sketch {
         id: String,
-        plane: Plane,
+        /// Where the sketch sits: an origin plane, or the start or end face of an extrude.
+        plane: SketchPlane,
+        /// Moves the sketch this far (mm) along the plane's normal. Left out when 0.
+        #[serde(default, skip_serializing_if = "is_zero")]
+        offset: f64,
         entities: Vec<SketchEntity>,
         #[serde(default)]
         suppressed: bool,
@@ -64,6 +68,87 @@ pub enum Plane {
     XY,
     XZ,
     YZ,
+}
+
+/// Where a sketch sits. In JSON: `"XY"` (or `"XZ"`, `"YZ"`), or
+/// `{ "on": "<extrude id>", "side": "end" }` for the face that extrude ends on
+/// (`"start"` for the face it starts from).
+///
+/// A sketch on an extrude's face uses the same x / y / normal directions as the sketch
+/// that extrude came from; only the height changes. So the plate's hole positions and a
+/// boss on its top face share coordinates, and a positive distance keeps going the same
+/// way the extrude went.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SketchPlane {
+    Origin(Plane),
+    Face { on: String, side: Side },
+}
+
+/// Which face of an extrude.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Side {
+    /// Where the extrude starts: its sketch's plane.
+    Start,
+    /// Where it ends: its sketch's plane moved by its distance.
+    #[default]
+    End,
+}
+
+impl From<Plane> for SketchPlane {
+    fn from(p: Plane) -> Self {
+        SketchPlane::Origin(p)
+    }
+}
+
+// Written by hand like HoleDepth: "a word or an object" with clear errors.
+impl Serialize for SketchPlane {
+    fn serialize<S: serde::Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
+        match self {
+            SketchPlane::Origin(p) => p.serialize(ser),
+            SketchPlane::Face { on, side } => {
+                use serde::ser::SerializeMap;
+                let mut m = ser.serialize_map(Some(2))?;
+                m.serialize_entry("on", on)?;
+                m.serialize_entry("side", side)?;
+                m.end()
+            }
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for SketchPlane {
+    fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Face {
+            on: String,
+            #[serde(default)]
+            side: Side,
+        }
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Raw {
+            Word(String),
+            Face(Face),
+            Other(serde_json::Value),
+        }
+        const HELP: &str = "a sketch plane is \"XY\", \"XZ\", \"YZ\", or {\"on\": \"<extrude id>\", \"side\": \"start\" or \"end\"}";
+        match Raw::deserialize(de)? {
+            Raw::Word(w) => match w.as_str() {
+                "XY" => Ok(Plane::XY.into()),
+                "XZ" => Ok(Plane::XZ.into()),
+                "YZ" => Ok(Plane::YZ.into()),
+                _ => Err(serde::de::Error::custom(format!("{HELP}, not {w:?}"))),
+            },
+            Raw::Face(f) => Ok(SketchPlane::Face { on: f.on, side: f.side }),
+            Raw::Other(v) => Err(serde::de::Error::custom(format!("{HELP}, not {v}"))),
+        }
+    }
+}
+
+fn is_zero(v: &f64) -> bool {
+    *v == 0.0
 }
 
 /// What an extrude does to the existing solid.
@@ -195,7 +280,17 @@ impl Design {
                 suppressed_ids.insert(id);
             }
             match f {
-                Feature::Sketch { entities, .. } => {
+                Feature::Sketch { plane, offset, entities, suppressed, .. } => {
+                    if let SketchPlane::Face { on, .. } = plane {
+                        if !extrudes.contains(on.as_str()) {
+                            bad(id, format!("sits on a face of {on:?}, which isn't an extrude earlier in the list"));
+                        } else if suppressed_ids.contains(on.as_str()) && !*suppressed {
+                            bad(id, format!("sits on a face of {on:?}, which is suppressed"));
+                        }
+                    }
+                    if !offset.is_finite() {
+                        bad(id, "the sketch offset isn't a finite number".into());
+                    }
                     if entities.is_empty() {
                         bad(id, "a sketch needs at least one shape".into());
                     }
@@ -360,6 +455,49 @@ mod tests {
             at[0][0] = f64::INFINITY;
         }
         assert_eq!(design.validate().len(), 2, "{:?}", design.validate());
+    }
+
+    #[test]
+    fn sketch_planes_read_and_write() {
+        let text = r#"{ "name": "x", "features": [
+            { "id": "s1", "type": "sketch", "plane": "XY", "entities": [ { "type": "rect", "x0": 0, "y0": 0, "x1": 10, "y1": 10 } ] },
+            { "id": "e1", "type": "extrude", "sketch": "s1", "distance": 3 },
+            { "id": "s2", "type": "sketch", "plane": { "on": "e1" }, "entities": [ { "type": "circle", "cx": 5, "cy": 5, "r": 1 } ] },
+            { "id": "s3", "type": "sketch", "plane": "YZ", "offset": -2.5, "entities": [ { "type": "circle", "cx": 5, "cy": 5, "r": 1 } ] } ] }"#;
+        let design = Design::from_json(text).expect("loads");
+        assert!(design.validate().is_empty(), "{:?}", design.validate());
+        match &design.features[2] {
+            Feature::Sketch { plane, offset, .. } => {
+                assert_eq!(plane, &SketchPlane::Face { on: "e1".into(), side: Side::End }, "side defaults to end");
+                assert_eq!(*offset, 0.0);
+            }
+            other => panic!("expected a sketch, got {other:?}"),
+        }
+        let json = design.to_json();
+        assert!(json.contains(r#""offset": -2.5"#) && json.matches("offset").count() == 1, "offset only written when set");
+        assert_eq!(Design::from_json(&json).expect("reloads"), design);
+
+        // Clear errors for a bad plane.
+        let bad = |plane: &str| {
+            let t = format!(r#"{{ "name": "x", "features": [ {{ "id": "s1", "type": "sketch", "plane": {plane}, "entities": [] }} ] }}"#);
+            Design::from_json(&t).unwrap_err().to_string()
+        };
+        assert!(bad(r#""XYZ""#).contains("\"XY\", \"XZ\", \"YZ\""));
+        assert!(bad(r#"{ "on": "e1", "sid": "end" }"#).contains("sketch plane is"));
+        assert!(bad(r#"{ "on": "e1", "side": "top" }"#).contains("sketch plane is"));
+    }
+
+    #[test]
+    fn a_sketch_on_a_face_needs_an_earlier_extrude() {
+        let msgs = problems_for(
+            r#"{ "name": "x", "features": [
+            { "id": "s0", "type": "sketch", "plane": "XY", "entities": [ { "type": "circle", "cx": 0, "cy": 0, "r": 5 } ] },
+            { "id": "s1", "type": "sketch", "plane": { "on": "e1", "side": "end" }, "entities": [ { "type": "circle", "cx": 0, "cy": 0, "r": 5 } ] },
+            { "id": "s2", "type": "sketch", "plane": { "on": "s0" }, "entities": [ { "type": "circle", "cx": 0, "cy": 0, "r": 5 } ] },
+            { "id": "e1", "type": "extrude", "sketch": "s0", "distance": 3 } ] }"#,
+        );
+        assert_eq!(msgs.len(), 2, "{msgs:?}");
+        assert!(msgs.iter().all(|m| m.contains("isn't an extrude earlier")), "{msgs:?}");
     }
 
     #[test]

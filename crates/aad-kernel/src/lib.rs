@@ -5,6 +5,8 @@
 //! How features become geometry:
 //! - **Sketch:** remembered until an extrude uses it. Shapes that sit fully inside another
 //!   shape become holes in it (a rectangle with circles inside is a plate with holes).
+//!   A sketch sits on an origin plane or on the start or end face of an earlier extrude,
+//!   optionally moved along the normal by `offset`.
 //! - **Extrude:** each region of the sketch is swept along the plane's normal.
 //!   `new` starts a new body, `join` adds to the current (latest) body, `cut` removes from it.
 //!   A negative distance extrudes the other way.
@@ -13,15 +15,17 @@
 //! ## Working around coplanar faces
 //!
 //! Truck's booleans fail when two solids share a flat face (for example a pocket cut that
-//! starts on the plate's bottom face). Every sketch sits on a plane through the origin, so
-//! this would happen all the time. Two workarounds:
+//! starts on the plate's bottom face, or a boss sketched on its top face). Sketches sit on
+//! the body's faces all the time, so there are workarounds:
 //! - **Cuts and holes:** if a cutting tool ends exactly at the body's outer limit, it is
 //!   lengthened 1 mm into the empty space beyond. Same result, no shared face.
-//! - **Joins:** if Truck can't fuse the new shape into the body, it is kept as a separate,
-//!   overlapping *piece* of the same body. Slicers and the viewer handle this fine;
-//!   [`Part::has_overlapping_pieces`] says when it happened.
+//! - **Joins:** if the fuse fails, the new shape's ends are nudged off the shared face
+//!   where that can't change the result (see [`join`]), and the fuse is tried again.
+//!   If it still fails, the shape is kept as a separate, overlapping *piece* of the same
+//!   body. Slicers and the viewer handle that fine; [`Part::has_overlapping_pieces`] says
+//!   when it happened.
 
-use aad_model::{BodyOp, Design, Feature, HoleDepth, Plane, SketchEntity};
+use aad_model::{BodyOp, Design, Feature, HoleDepth, Plane, Side, SketchEntity, SketchPlane};
 use std::collections::HashMap;
 use truck_meshalgo::prelude::{CalcVolume, MeshableShape, MeshedShape, PolygonMesh, PolylineCurve};
 use truck_modeling::{builder, EuclideanSpace, InnerSpace, Rad, Vector3, Wire};
@@ -251,44 +255,68 @@ impl Extent {
     fn overlaps(&self, other: &Extent) -> bool {
         (0..3).all(|k| self.lo[k] < other.hi[k] - SAME && other.lo[k] < self.hi[k] - SAME)
     }
+
+    /// Do the boxes overlap or at least touch? (A boss sitting on a plate's top face only
+    /// touches it, but should still be fused into it.)
+    fn touches(&self, other: &Extent) -> bool {
+        (0..3).all(|k| self.lo[k] <= other.hi[k] + SAME && other.lo[k] <= self.hi[k] + SAME)
+    }
+
+    /// The box's eight corners.
+    fn corners(&self) -> impl Iterator<Item = Point3> + '_ {
+        (0..8).map(|i| {
+            let pick = |k: usize| if i & (1 << k) == 0 { self.lo[k] } else { self.hi[k] };
+            Point3::new(pick(0), pick(1), pick(2))
+        })
+    }
 }
 
-/// A sketch plane as three directions: `u` and `v` lie in the plane, `n` is its normal.
-/// They are right-handed (u × v = n), so a sketch's x/y map onto u/v.
+/// A sketch plane: a point on it (`origin`, where sketch (0, 0) is) and three directions.
+/// `u` and `v` lie in the plane, `n` is its normal. They are right-handed (u × v = n), so a
+/// sketch's x/y map onto u/v.
+#[derive(Debug, Clone, Copy)]
 struct Frame {
+    origin: Point3,
     u: Vector3,
     v: Vector3,
     n: Vector3,
 }
 
 impl Frame {
+    /// One of the three planes through the origin.
     fn of(plane: Plane) -> Frame {
         let (x, y, z) = (Vector3::unit_x(), Vector3::unit_y(), Vector3::unit_z());
+        let origin = Point3::origin();
         match plane {
-            Plane::XY => Frame { u: x, v: y, n: z },
-            Plane::XZ => Frame { u: x, v: z, n: -y },
-            Plane::YZ => Frame { u: y, v: z, n: x },
+            Plane::XY => Frame { origin, u: x, v: y, n: z },
+            Plane::XZ => Frame { origin, u: x, v: z, n: -y },
+            Plane::YZ => Frame { origin, u: y, v: z, n: x },
         }
+    }
+
+    /// The same plane moved `h` along its normal.
+    fn moved(self, h: f64) -> Frame {
+        Frame { origin: self.origin + self.n * h, ..self }
     }
 
     /// The 3D point at sketch coordinates (x, y), lifted `h` along the normal.
     fn point(&self, x: f64, y: f64, h: f64) -> Point3 {
-        Point3::from_vec(self.u * x + self.v * y + self.n * h)
+        self.origin + self.u * x + self.v * y + self.n * h
     }
 
-    /// The range of heights (along `n`) that a box covers.
+    /// The range of heights (along `n`, measured from the plane) that a box covers.
     fn heights(&self, e: &Extent) -> (f64, f64) {
-        // n is always plus or minus one axis.
-        let k = (0..3).find(|&k| self.n[k] != 0.0).expect("n is an axis");
-        if self.n[k] > 0.0 {
-            (e.lo[k], e.hi[k])
-        } else {
-            (-e.hi[k], -e.lo[k])
+        let mut range = (f64::INFINITY, f64::NEG_INFINITY);
+        for corner in e.corners() {
+            let h = (corner - self.origin).dot(self.n);
+            range = (range.0.min(h), range.1.max(h));
         }
+        range
     }
 }
 
 /// A flat region (an outline, minus any holes) swept between two heights.
+#[derive(Clone)]
 struct Prism<'a> {
     frame: &'a Frame,
     outer: SketchEntity,
@@ -335,9 +363,10 @@ impl Prism<'_> {
     }
 }
 
-/// What we remember about each extrude, so holes can find their body and plane.
+/// What we remember about each extrude, so holes and sketches on its faces can find it.
 struct ExtrudeInfo {
-    plane: Plane,
+    /// The plane of the sketch it extruded.
+    frame: Frame,
     distance: f64,
     body: usize,
 }
@@ -348,19 +377,29 @@ pub fn build(design: &Design) -> Result<Part, BuildError> {
         return fail(&p.feature, p.message.clone());
     }
 
-    let mut sketches: HashMap<&str, (Plane, &[SketchEntity])> = HashMap::new();
+    let mut sketches: HashMap<&str, (Frame, &[SketchEntity])> = HashMap::new();
     let mut extrudes: HashMap<&str, ExtrudeInfo> = HashMap::new();
     let mut bodies: Vec<Body> = Vec::new();
 
     for feature in design.features.iter().filter(|f| !f.is_suppressed()) {
         let id = feature.id();
         match feature {
-            Feature::Sketch { plane, entities, .. } => {
-                sketches.insert(id, (*plane, entities.as_slice()));
+            Feature::Sketch { plane, offset, entities, .. } => {
+                let frame = match plane {
+                    SketchPlane::Origin(p) => Frame::of(*p),
+                    // Validation guarantees `on` is an earlier, active extrude.
+                    SketchPlane::Face { on, side } => {
+                        let info = &extrudes[on.as_str()];
+                        match side {
+                            Side::Start => info.frame,
+                            Side::End => info.frame.moved(info.distance),
+                        }
+                    }
+                };
+                sketches.insert(id, (frame.moved(*offset), entities.as_slice()));
             }
             Feature::Extrude { sketch, distance, op, .. } => {
-                let (plane, entities) = sketches[sketch.as_str()];
-                let frame = Frame::of(plane);
+                let (frame, entities) = sketches[sketch.as_str()];
                 let (h0, h1) = (distance.min(0.0), distance.max(0.0));
                 let prisms = regions(id, entities)?
                     .into_iter()
@@ -372,18 +411,18 @@ pub fn build(design: &Design) -> Result<Part, BuildError> {
                 let body = bodies.last_mut().expect("validated");
                 for prism in prisms {
                     match op {
-                        BodyOp::New | BodyOp::Join => join(body, prism.solid(), prism.extent()),
+                        BodyOp::New | BodyOp::Join => join(body, &prism),
                         BodyOp::Cut => {
                             let tool = prism.lengthened_past(&body.extent());
                             cut(id, body, tool.solid(), tool.extent())?
                         }
                     }
                 }
-                extrudes.insert(id, ExtrudeInfo { plane, distance: *distance, body: bodies.len() - 1 });
+                extrudes.insert(id, ExtrudeInfo { frame, distance: *distance, body: bodies.len() - 1 });
             }
             Feature::Hole { on, diameter, at, depth, .. } => {
                 let info = &extrudes[on.as_str()];
-                let frame = Frame::of(info.plane);
+                let frame = info.frame;
                 let body = &mut bodies[info.body];
                 // Heights the hole spans before lengthening; "through" spans the whole body.
                 let (h0, h1) = match *depth {
@@ -402,16 +441,141 @@ pub fn build(design: &Design) -> Result<Part, BuildError> {
     Ok(Part { bodies })
 }
 
-/// Fuse a solid into a body, or keep it as an extra overlapping piece if Truck can't.
-fn join(body: &mut Body, solid: Solid, extent: Extent) {
-    for piece in body.pieces.iter_mut().filter(|p| p.extent.overlaps(&extent)) {
-        if let Some(fused) = truck_shapeops::or(&piece.solid, &solid, BOOLEAN_TOLERANCE) {
+/// Fuse a prism into a body, or keep it as an extra overlapping piece if Truck can't.
+///
+/// Truck fails when the prism's end face lies exactly on one of the body's faces (a boss
+/// sketched on the plate's top face, or a post that starts on the plate's bottom face).
+/// So when the first try fails, each end of the prism is nudged [`NUDGE`] mm where that
+/// doesn't change the result: *into* the body if the material there is already solid
+/// (the post starts 0.5 mm higher, still inside the plate), or *back into* the body if the
+/// material just beyond the end is solid (the boss starts 0.5 mm down inside the plate).
+/// Then no faces are shared and the fuse works.
+fn join(body: &mut Body, prism: &Prism) {
+    let (solid, extent) = (prism.solid(), prism.extent());
+    for piece in body.pieces.iter_mut().filter(|p| p.extent.touches(&extent)) {
+        let fused = truck_shapeops::or(&piece.solid, &solid, BOOLEAN_TOLERANCE).or_else(|| {
+            let nudged = prism.nudged_into(&piece.solid)?;
+            truck_shapeops::or(&piece.solid, &nudged.solid(), BOOLEAN_TOLERANCE)
+        });
+        if let Some(fused) = fused {
             piece.solid = fused;
             piece.extent = piece.extent.union(extent);
             return;
         }
     }
     body.pieces.push(Piece { solid, extent });
+}
+
+/// How far a join's end is moved to get it off a shared face (see [`join`]).
+const NUDGE: f64 = 0.5;
+
+impl Prism<'_> {
+    /// This prism with its ends moved off any face it shares with `solid`, where that
+    /// leaves the joined result the same. `None` if neither end can safely move.
+    fn nudged_into(&self, solid: &Solid) -> Option<Self> {
+        let inside = Inside::new(solid);
+        let points = self.sample_points();
+        // Is the slab of this prism's outline between heights a and b all inside `solid`?
+        let solid_between = |a: f64, b: f64| {
+            [0.15, 0.85].iter().all(|t| {
+                let h = a + (b - a) * t;
+                points.iter().all(|&(x, y)| inside.contains(self.frame.point(x, y, h)))
+            })
+        };
+        let mut out = self.clone();
+        let long_enough = self.h1 - self.h0 > 3.0 * NUDGE;
+        if long_enough && solid_between(self.h0, self.h0 + NUDGE) {
+            out.h0 += NUDGE; // the start is buried in material: start a little later
+        } else if solid_between(self.h0 - NUDGE, self.h0) {
+            out.h0 -= NUDGE; // the start sits on material: start a little inside it
+        }
+        if long_enough && solid_between(self.h1 - NUDGE, self.h1) {
+            out.h1 -= NUDGE;
+        } else if solid_between(self.h1, self.h1 + NUDGE) {
+            out.h1 += NUDGE;
+        }
+        (out.h0 != self.h0 || out.h1 != self.h1).then_some(out)
+    }
+
+    /// Points spread over the prism's region (inside the outline, outside its holes), in
+    /// sketch coordinates. Used to check that material is there before nudging.
+    fn sample_points(&self) -> Vec<(f64, f64)> {
+        let mut points = Vec::new();
+        match self.outer {
+            SketchEntity::Rect { x0, y0, x1, y1 } => {
+                let (xa, xb, ya, yb) = (x0.min(x1), x0.max(x1), y0.min(y1), y0.max(y1));
+                // A 9 x 9 grid, kept a hair inside the edges.
+                let inset = |a: f64, b: f64, t: f64| a + (b - a) * (0.01 + 0.98 * t);
+                for i in 0..9 {
+                    for j in 0..9 {
+                        points.push((inset(xa, xb, i as f64 / 8.0), inset(ya, yb, j as f64 / 8.0)));
+                    }
+                }
+            }
+            SketchEntity::Circle { cx, cy, r } => {
+                points.push((cx, cy));
+                for ring in [0.33, 0.66, 0.97] {
+                    for k in 0..16 {
+                        let a = k as f64 * std::f64::consts::TAU / 16.0;
+                        points.push((cx + r * ring * a.cos(), cy + r * ring * a.sin()));
+                    }
+                }
+            }
+        }
+        points.retain(|&(x, y)| !self.holes.iter().any(|h| contains(h, x, y)));
+        points
+    }
+}
+
+/// Whether a sketch shape covers the point (x, y).
+fn contains(shape: &SketchEntity, x: f64, y: f64) -> bool {
+    match *shape {
+        SketchEntity::Rect { x0, y0, x1, y1 } => x >= x0.min(x1) && x <= x0.max(x1) && y >= y0.min(y1) && y <= y0.max(y1),
+        SketchEntity::Circle { cx, cy, r } => (x - cx).hypot(y - cy) <= r,
+    }
+}
+
+/// Answers "is this point inside the solid?" using its triangle mesh: a ray from the
+/// point crosses the surface an odd number of times exactly when the point is inside.
+struct Inside {
+    triangles: Vec<[Point3; 3]>,
+}
+
+impl Inside {
+    fn new(solid: &Solid) -> Inside {
+        let mesh = solid.triangulation(MESH_TOLERANCE).to_polygon();
+        let positions = mesh.positions();
+        let triangles = mesh.faces().triangle_iter().map(|t| t.map(|v| positions[v.pos])).collect();
+        Inside { triangles }
+    }
+
+    fn contains(&self, p: Point3) -> bool {
+        // A slightly skewed direction, so the ray doesn't run exactly along an edge.
+        let dir = Vector3::new(1.0, 0.000_123_7, 0.000_317_9).normalize();
+        let crossings = self.triangles.iter().filter(|t| ray_hits(p, dir, t)).count();
+        crossings % 2 == 1
+    }
+}
+
+/// Does the ray from `p` along `dir` pass through the triangle? (Möller–Trumbore.)
+fn ray_hits(p: Point3, dir: Vector3, t: &[Point3; 3]) -> bool {
+    let (e1, e2) = (t[1] - t[0], t[2] - t[0]);
+    let pv = dir.cross(e2);
+    let det = e1.dot(pv);
+    if det.abs() < 1e-12 {
+        return false; // the ray runs along the triangle
+    }
+    let tv = p - t[0];
+    let u = tv.dot(pv) / det;
+    if !(0.0..=1.0).contains(&u) {
+        return false;
+    }
+    let qv = tv.cross(e1);
+    let v = dir.dot(qv) / det;
+    if v < 0.0 || u + v > 1.0 {
+        return false;
+    }
+    e2.dot(qv) / det > 0.0
 }
 
 /// Remove a tool from every piece it might touch.

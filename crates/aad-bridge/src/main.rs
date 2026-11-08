@@ -16,12 +16,17 @@ Read it with get_design, change it with propose_features (the user accepts or re
 then wait with proposal_status. Use render to look at the part (or a waiting proposal) and check your work.";
 
 const FEATURE_FORMAT: &str = "Feature format (all sizes in mm):
-- sketch: {\"id\", \"type\":\"sketch\", \"plane\":\"XY\"|\"XZ\"|\"YZ\", \"entities\":[{\"type\":\"rect\",\"x0\",\"y0\",\"x1\",\"y1\"} | {\"type\":\"circle\",\"cx\",\"cy\",\"r\"}]}. A shape fully inside another becomes a hole in it.
+- sketch: {\"id\", \"type\":\"sketch\", \"plane\":<plane>, \"offset\":<mm, optional>, \"entities\":[{\"type\":\"rect\",\"x0\",\"y0\",\"x1\",\"y1\"} | {\"type\":\"circle\",\"cx\",\"cy\",\"r\"}]}. A shape fully inside another becomes a hole in it.
+  <plane> is \"XY\" (sketch x,y = world X,Y; normal +Z), \"XZ\" (x,y = X,Z; normal -Y) or \"YZ\" (x,y = Y,Z; normal +X), \
+or {\"on\":<extrude id>, \"side\":\"end\"|\"start\"} for the face that extrude ends on (default) or starts from. \
+A face sketch uses the same x/y/normal as that extrude's sketch, so coordinates line up and it moves with the extrude; \
+a positive distance keeps going the way that extrude went (use a negative one to go back out of a start face). \
+\"offset\" moves the sketch along the normal. Put a boss on top of a plate with plane {\"on\":\"plate\"} and a join extrude.
 - extrude: {\"id\", \"type\":\"extrude\", \"sketch\":<sketch id>, \"distance\", \"op\":\"new\"|\"join\"|\"cut\"}. A negative distance goes the other way.
 - hole: {\"id\", \"type\":\"hole\", \"on\":<extrude id>, \"diameter\", \"at\":[[x,y],...], \"depth\":\"through\"|<mm>}. Positions are in the sketch plane of `on`.
 Any feature may have \"suppressed\": true. A feature may only refer to features before it.
 Kernel limits: a cut flush with a side face fails (overlap the edge or stop short of it); a join that \
-can't be fused is kept as an overlapping piece.";
+can't be fused (for example one hanging over an edge) is kept as an overlapping piece, which measure notes.";
 
 /// The tools Claude sees.
 fn tools() -> Value {

@@ -62,6 +62,11 @@ v1 feature types: `sketch` (line, rect, circle, arc, polygon, corner radius),
 circle), `bore` (bearing, 1/2 in hex), `linear_pattern`, `circular_pattern`,
 `mirror`, `boolean`.
 
+Sketch planes: an origin plane (`"XY"`, `"XZ"`, `"YZ"`), or a face of an earlier extrude
+(`{ "on": "plate", "side": "end" }`, the default side; or `"start"`), plus an optional
+`offset` in mm along the normal. A face sketch keeps the directions of the sketch that
+extrude came from, so coordinates line up and it moves when the extrude changes.
+
 Every feature has an `id`, can be **suppressed**, and is checked against a
 schema before it reaches the kernel, so a bad AI step gives Claude a clear error
 instead of a broken model.
@@ -109,12 +114,14 @@ instead of a broken model.
 - **Ghost previews:** *settled in phase 4.* All three, switchable in the proposal bar: the proposed part (blue) with the current part's edges in orange, the current part alone, or the current part with the proposal see-through over it.
 - **Hole sizes:** which clearance table for M3/M4/M5 and #10 / 1/4 in screws?
 - **Hex bore tolerance** for 1/2 in hex shaft (printed vs machined)?
-- **Joins that Truck can't fuse.** Truck's booleans fail on shared flat faces, and
-  since every sketch sits on an origin plane, a joined boss almost always shares the
-  plate's bottom face. For now such a join stays as an overlapping piece of the same
-  body (fine for STL and printing; STEP gets two overlapping solids; `volume` counts the
-  overlap twice). Options: sketch planes with an offset, a fix upstream in Truck, or
-  another kernel. The `monstertruck` fork was tried (Nov 2026): it handles flush cuts
+- **Joins that Truck can't fuse:** *mostly settled (Nov 2026).* Truck's booleans fail
+  on shared flat faces. Now, when a fuse fails, the kernel nudges the joined shape's end
+  0.5 mm off the shared face where the material there is solid anyway (checked by
+  sampling points against the body's mesh), and tries again; bosses on faces and posts
+  from the bottom plane now fuse into one solid. A join that hangs over an edge can't be
+  nudged safely and still stays an overlapping piece (fine for STL and printing; STEP gets
+  two overlapping solids; `volume` counts the overlap twice). A body hole narrower than
+  the sampling grid under a boss could be missed by the check (rare). The `monstertruck` fork was tried (Nov 2026): it handles flush cuts
   but still fails these joins, and returns an empty solid for a cut that misses.
 - **Cuts flush with a side face** (a notch at the plate's edge) still fail in Truck;
   the error tells Claude to overlap the edge or stop short of it.
