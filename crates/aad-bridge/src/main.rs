@@ -13,7 +13,7 @@ const PROTOCOL_VERSION: &str = "2025-06-18";
 const INSTRUCTIONS: &str = "Tools for AiAidedDesign, a CAD app for FIRST Robotics parts. \
 The user's open design is a list of features (sketch, extrude, hole), sizes in mm. \
 Read it with get_design, change it with propose_features (the user accepts or rejects in the app), \
-then wait with proposal_status.";
+then wait with proposal_status. Use render to look at the part (or a waiting proposal) and check your work.";
 
 const FEATURE_FORMAT: &str = "Feature format (all sizes in mm):
 - sketch: {\"id\", \"type\":\"sketch\", \"plane\":\"XY\"|\"XZ\"|\"YZ\", \"entities\":[{\"type\":\"rect\",\"x0\",\"y0\",\"x1\",\"y1\"} | {\"type\":\"circle\",\"cx\",\"cy\",\"r\"}]}. A shape fully inside another becomes a hole in it.
@@ -33,7 +33,7 @@ fn tools() -> Value {
         },
         {
             "name": "propose_features",
-            "description": format!("Propose a change to the design. The user sees it in the AiAidedDesign console and accepts or rejects it; \
+            "description": format!("Propose a change to the design. The user sees it in the AiAidedDesign window and accepts or rejects it; \
 nothing changes until they accept. A proposal applies to the current accepted design (get_design), and replaces any proposal still waiting. \
 By default features merge by id: a feature with an existing id replaces it in place, a new id goes on the end, and ids in `remove` are deleted. \
 With replace_all, `features` becomes the whole list. The result is validated and built first; problems come back as an error and the user isn't asked.\n\n{FEATURE_FORMAT}"),
@@ -76,9 +76,26 @@ Give only a file name such as \"bracket.step\"; it is written next to the user's
                 "properties": { "file_name": { "type": "string", "description": "Ends in .stl, .step or .stp." } },
                 "required": ["file_name"]
             }
+        },
+        {
+            "name": "render",
+            "description": "A picture of the part, to check your work: by default four views in one image (iso, top, front, right). \
+Shows the waiting proposal if there is one (blue, with the current part's edges in orange), otherwise the accepted design (grey). \
+The grid is on the XY plane in 10 mm squares; the X axis is red, Y green, Z blue (up).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "view": { "type": "string", "enum": ["all", "iso", "top", "front", "right"], "description": "Default all." },
+                    "target": { "type": "string", "enum": ["design", "proposal"], "description": "Default: the proposal if one is waiting, else the design." },
+                    "size": { "type": "integer", "minimum": 200, "maximum": 2000, "description": "Picture width and height in pixels (default 900)." }
+                }
+            }
         }
     ])
 }
+
+/// The app sends a picture as base64 PNG under this key; it goes to Claude as an MCP image.
+const IMAGE_KEY: &str = "image_png_base64";
 
 /// How a tool call reaches the app (a real connection, or a stand-in in tests).
 type AppCall<'a> = &'a dyn Fn(&str, Value) -> Result<Value, String>;
@@ -130,11 +147,19 @@ fn call_tool(params: &Value, app: AppCall) -> Value {
     let args = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
     let known = tools().as_array().is_some_and(|t| t.iter().any(|t| t["name"] == name));
     let outcome = if known { app(name, args) } else { Err(format!("there's no tool called {name:?}")) };
-    let (text, is_error) = match outcome {
-        Ok(v) => (serde_json::to_string_pretty(&v).unwrap_or_default(), false),
-        Err(e) => (e, true),
-    };
-    json!({ "content": [{ "type": "text", "text": text }], "isError": is_error })
+    match outcome {
+        Ok(mut v) => {
+            // A picture goes first as an image; the rest of the answer follows as text.
+            let image = v.as_object_mut().and_then(|o| o.remove(IMAGE_KEY));
+            let mut content = Vec::new();
+            if let Some(Value::String(data)) = image {
+                content.push(json!({ "type": "image", "data": data, "mimeType": "image/png" }));
+            }
+            content.push(json!({ "type": "text", "text": serde_json::to_string_pretty(&v).unwrap_or_default() }));
+            json!({ "content": content, "isError": false })
+        }
+        Err(e) => json!({ "content": [{ "type": "text", "text": e }], "isError": true }),
+    }
 }
 
 fn rpc_error(id: Value, code: i64, message: &str) -> Value {
@@ -165,7 +190,18 @@ mod tests {
         let list = ask(json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }), &closed).expect("answers");
         let names: Vec<&str> =
             list["result"]["tools"].as_array().expect("array").iter().filter_map(|t| t["name"].as_str()).collect();
-        assert_eq!(names, ["get_design", "propose_features", "proposal_status", "measure", "export"]);
+        assert_eq!(names, ["get_design", "propose_features", "proposal_status", "measure", "export", "render"]);
+    }
+
+    #[test]
+    fn pictures_go_to_claude_as_images() {
+        let picture = |_: &str, _: Value| Ok(json!({ IMAGE_KEY: "iVBORw0K", "description": "four views" }));
+        let call = json!({ "jsonrpc": "2.0", "id": 6, "method": "tools/call", "params": { "name": "render" } });
+        let reply = ask(call, &picture).expect("answers");
+        let content = &reply["result"]["content"];
+        assert_eq!(content[0], json!({ "type": "image", "data": "iVBORw0K", "mimeType": "image/png" }));
+        let text = content[1]["text"].as_str().expect("text");
+        assert!(text.contains("four views") && !text.contains("iVBOR"), "the text part leaves the picture out: {text}");
     }
 
     #[test]

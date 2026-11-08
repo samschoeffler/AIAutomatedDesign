@@ -22,3 +22,8 @@ eframe = "0.37"
 bytemuck = { version = "1.25", features = ["derive"] }
 # Vectors and matrices for the 3D camera.
 glam = "0.34"
+# The render tool: pictures for Claude are PNG files, sent as base64 text.
+png = "0.18.1"
+base64 = "0.23.1"
+# Waits for the GPU to be set up (wgpu does that asynchronously).
+pollster = "1.0.1"

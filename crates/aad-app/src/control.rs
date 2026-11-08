@@ -330,6 +330,7 @@ pub fn handle(app: &Shared, command: &str, args: Value) -> Result<Value, String>
         "proposal_status" => status(app, parse(args)?),
         "measure" => measure(app, parse(args)?),
         "export" => export(app, parse(args)?),
+        "render" => render(app, parse(args)?),
         other => Err(format!("unknown command {other:?}")),
     }
 }
@@ -513,6 +514,53 @@ fn export(app: &Shared, args: ExportArgs) -> Result<Value, String> {
     Ok(json!({ "path": path, "measurements": measurements(&part) }))
 }
 
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RenderArgs {
+    /// "iso", "top", "front", "right", or "all" (the default) for all four in one picture.
+    view: Option<String>,
+    /// Defaults to the waiting proposal if there is one, otherwise the design.
+    target: Option<Target>,
+    /// Picture width and height in pixels.
+    size: Option<u32>,
+}
+
+/// The default picture size: big enough to see holes clearly, small enough to send quickly.
+const RENDER_SIZE: u32 = 900;
+
+fn render(app: &Shared, args: RenderArgs) -> Result<Value, String> {
+    use crate::gui::render::{self, Request};
+    use crate::gui::viewer::View;
+    let view = match args.view.as_deref().unwrap_or("all").to_ascii_lowercase().as_str() {
+        "all" => None,
+        "iso" => Some(View::Iso),
+        "top" => Some(View::Top),
+        "front" => Some(View::Front),
+        "right" | "side" => Some(View::Right),
+        other => return Err(format!("view {other:?} isn't one of iso, top, front, right, all")),
+    };
+    let (design, proposal) = {
+        let a = lock(app);
+        let pending = a.pending().map(|p| p.design.clone());
+        let proposal = match args.target {
+            Some(Target::Design) => None,
+            Some(Target::Proposal) => Some(pending.ok_or("no proposal is waiting")?),
+            None => pending,
+        };
+        (a.design.clone(), proposal)
+    }; // the lock is let go before the (slow) drawing
+    if design.features.is_empty() && proposal.is_none() {
+        return Err("the design is empty; there's nothing to draw yet".into());
+    }
+    let size = args.size.unwrap_or(RENDER_SIZE);
+    let png = render::render_png(&Request { design: &design, proposal: proposal.as_ref(), view, size })?;
+    Ok(json!({
+        "image_png_base64": render::base64(&png),
+        "showing": if proposal.is_some() { "proposal" } else { "design" },
+        "description": render::describe(view, proposal.is_some()),
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -684,6 +732,26 @@ mod tests {
         assert!(a.revision > before);
         a.undo().expect("undoes");
         assert_eq!(a.design.name, "Plate");
+    }
+
+    #[test]
+    fn render_checks_its_arguments_and_shows_a_waiting_proposal() {
+        let app = shared(plate());
+        let err = handle(&app, "render", json!({ "view": "bottom" })).unwrap_err();
+        assert!(err.contains("isn't one of"), "{err}");
+        assert!(handle(&app, "render", json!({ "target": "proposal" })).unwrap_err().contains("no proposal"));
+        let empty = shared(Design { name: "e".into(), units: "mm".into(), features: Vec::new() });
+        assert!(handle(&empty, "render", Value::Null).unwrap_err().contains("empty"));
+
+        handle(&app, "propose_features", json!({ "name": "B" })).expect("proposes");
+        match handle(&app, "render", json!({ "view": "iso", "size": 200 })) {
+            Ok(v) => {
+                assert_eq!(v["showing"], "proposal", "a waiting proposal is shown by default");
+                assert!(v["image_png_base64"].as_str().is_some_and(|s| s.starts_with("iVBOR")), "base64 PNG");
+            }
+            Err(e) if e.contains("GPU") => eprintln!("no GPU here; skipping the drawing part: {e}"),
+            Err(e) => panic!("render failed: {e}"),
+        }
     }
 
     #[test]

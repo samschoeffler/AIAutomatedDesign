@@ -56,7 +56,7 @@ pub struct Camera {
 }
 
 impl Camera {
-    fn new() -> Camera {
+    pub fn new() -> Camera {
         let (yaw, pitch) = View::Iso.angles();
         Camera { target: Vec3::ZERO, yaw, pitch, distance: 300.0 }
     }
@@ -157,7 +157,7 @@ pub struct Viewer {
 }
 
 /// What the grid was made for; a new grid is made when this changes.
-type GridKey = (i32, i32, i32, i32, i32);
+pub type GridKey = (i32, i32, i32, i32, i32);
 
 impl Viewer {
     pub fn new() -> Viewer {
@@ -187,45 +187,8 @@ impl Viewer {
         }
         self.handle_input(ui, &response, rect, content);
 
-        let mut scene = Scene {
-            view_proj: self.camera.view_proj(self.aspect),
-            // Light from over the viewer's left shoulder.
-            light: {
-                let (right, up) = self.camera.right_up();
-                self.camera.backward() * 2.0 - right * 0.6 + up * 1.0
-            },
-            meshes: Vec::new(),
-            draws: Vec::new(),
-        };
         let grid = self.grid_for(content.bounds);
-        scene.meshes.push((Slot::Grid, grid));
-        scene.draws.push(Draw { slot: Slot::Grid, style: Style::Lines, color: [1.0; 4] });
-
-        let proposal = content.proposal.clone();
-        if let Some(m) = &content.design {
-            scene.meshes.push((Slot::Design, m.clone()));
-        }
-        if let Some(m) = &proposal {
-            scene.meshes.push((Slot::Proposal, m.clone()));
-        }
-        let draw = |slot, style, color| Draw { slot, style, color };
-        match (proposal.is_some(), content.compare) {
-            (true, Compare::Proposed) => {
-                scene.draws.push(draw(Slot::Proposal, Style::Solid, PROPOSED));
-                scene.draws.push(draw(Slot::Proposal, Style::Lines, PROPOSED_EDGE));
-                scene.draws.push(draw(Slot::Design, Style::Lines, OLD_EDGE));
-            }
-            (true, Compare::Both) => {
-                scene.draws.push(draw(Slot::Design, Style::Solid, PART));
-                scene.draws.push(draw(Slot::Design, Style::Lines, EDGE));
-                scene.draws.push(draw(Slot::Proposal, Style::Ghost, GHOST));
-                scene.draws.push(draw(Slot::Proposal, Style::Lines, PROPOSED_EDGE));
-            }
-            _ => {
-                scene.draws.push(draw(Slot::Design, Style::Solid, PART));
-                scene.draws.push(draw(Slot::Design, Style::Lines, EDGE));
-            }
-        }
+        let scene = scene(&self.camera, self.aspect, content, grid);
         ui.painter().add(eframe::egui_wgpu::Callback::new_paint_callback(rect, scene));
 
         // Axis key in the corner: which way X, Y and Z point.
@@ -280,56 +243,16 @@ impl Viewer {
         }
     }
 
-    /// A grid on the XY plane (10 mm squares, a stronger line every 50 mm) under the part,
-    /// plus the X and Y axes in red and green.
     fn grid_for(&mut self, bounds: Option<(Vec3, Vec3)>) -> Arc<MeshData> {
-        let (lo, hi) = bounds.unwrap_or((vec3(-50.0, -50.0, 0.0), vec3(50.0, 50.0, 0.0)));
-        let size = (hi - lo).max_element().max(20.0);
-        let step = if size > 600.0 { 50.0 } else { 10.0 };
-        let margin = (size * 0.25).max(step);
-        let snap = |v: f32, up: bool| {
-            let s = if up { (v / step).ceil() } else { (v / step).floor() };
-            s as i32
-        };
-        let key = (
-            snap(lo.x.min(0.0) - margin, false),
-            snap(lo.y.min(0.0) - margin, false),
-            snap(hi.x.max(0.0) + margin, true),
-            snap(hi.y.max(0.0) + margin, true),
-            step as i32,
-        );
-        if let Some((k, mesh)) = &self.grid {
-            if *k == key {
-                return mesh.clone();
+        let key = grid_key(bounds);
+        match &self.grid {
+            Some((k, mesh)) if *k == key => mesh.clone(),
+            _ => {
+                let mesh = make_grid(key);
+                self.grid = Some((key, mesh.clone()));
+                mesh
             }
         }
-        let (x0, y0, x1, y1) = (key.0 as f32 * step, key.1 as f32 * step, key.2 as f32 * step, key.3 as f32 * step);
-        let minor = [0.55, 0.58, 0.65, 0.16];
-        let major = [0.60, 0.63, 0.70, 0.32];
-        let mut lines = Vec::new();
-        let mut seg = |a: Vec3, b: Vec3, color: [f32; 4]| {
-            lines.push(LineVertex { position: a.into(), color });
-            lines.push(LineVertex { position: b.into(), color });
-        };
-        // A stronger line every 50 mm (or every 200 mm on the coarse grid).
-        let major_every = if step < 50.0 { 5 } else { 4 };
-        for i in key.0..=key.2 {
-            let x = i as f32 * step;
-            if i != 0 {
-                seg(vec3(x, y0, 0.0), vec3(x, y1, 0.0), if i % major_every == 0 { major } else { minor });
-            }
-        }
-        for j in key.1..=key.3 {
-            let y = j as f32 * step;
-            if j != 0 {
-                seg(vec3(x0, y, 0.0), vec3(x1, y, 0.0), if j % major_every == 0 { major } else { minor });
-            }
-        }
-        seg(vec3(x0, 0.0, 0.0), vec3(x1, 0.0, 0.0), [0.90, 0.30, 0.30, 0.7]); // X axis
-        seg(vec3(0.0, y0, 0.0), vec3(0.0, y1, 0.0), [0.35, 0.80, 0.35, 0.7]); // Y axis
-        let mesh = Arc::new(MeshData { id: next_mesh_id(), triangles: Vec::new(), lines });
-        self.grid = Some((key, mesh.clone()));
-        mesh
     }
 
     fn draw_axis_key(&self, ui: &egui::Ui, rect: egui::Rect) {
@@ -347,4 +270,100 @@ impl Viewer {
             painter.text(end, egui::Align2::CENTER_CENTER, name, egui::FontId::proportional(12.0), color);
         }
     }
+}
+
+/// What to draw for `content` seen through `camera`: the grid, then the part(s) in the
+/// colours that say which is which. Used by the window and by the render tool.
+pub fn scene(camera: &Camera, aspect: f32, content: &Content, grid: Arc<MeshData>) -> Scene {
+    let mut scene = Scene {
+        view_proj: camera.view_proj(aspect),
+        // Light from over the viewer's left shoulder.
+        light: {
+            let (right, up) = camera.right_up();
+            camera.backward() * 2.0 - right * 0.6 + up * 1.0
+        },
+        meshes: Vec::new(),
+        draws: Vec::new(),
+    };
+    scene.meshes.push((Slot::Grid, grid));
+    scene.draws.push(Draw { slot: Slot::Grid, style: Style::Lines, color: [1.0; 4] });
+
+    let proposal = content.proposal.clone();
+    if let Some(m) = &content.design {
+        scene.meshes.push((Slot::Design, m.clone()));
+    }
+    if let Some(m) = &proposal {
+        scene.meshes.push((Slot::Proposal, m.clone()));
+    }
+    let draw = |slot, style, color| Draw { slot, style, color };
+    match (proposal.is_some(), content.compare) {
+        (true, Compare::Proposed) => {
+            scene.draws.push(draw(Slot::Proposal, Style::Solid, PROPOSED));
+            scene.draws.push(draw(Slot::Proposal, Style::Lines, PROPOSED_EDGE));
+            scene.draws.push(draw(Slot::Design, Style::Lines, OLD_EDGE));
+        }
+        (true, Compare::Both) => {
+            scene.draws.push(draw(Slot::Design, Style::Solid, PART));
+            scene.draws.push(draw(Slot::Design, Style::Lines, EDGE));
+            scene.draws.push(draw(Slot::Proposal, Style::Ghost, GHOST));
+            scene.draws.push(draw(Slot::Proposal, Style::Lines, PROPOSED_EDGE));
+        }
+        _ => {
+            scene.draws.push(draw(Slot::Design, Style::Solid, PART));
+            scene.draws.push(draw(Slot::Design, Style::Lines, EDGE));
+        }
+    }
+    scene
+}
+
+/// The grid that suits a part of this size: see [`make_grid`].
+pub fn grid_key(bounds: Option<(Vec3, Vec3)>) -> GridKey {
+    let (lo, hi) = bounds.unwrap_or((vec3(-50.0, -50.0, 0.0), vec3(50.0, 50.0, 0.0)));
+    let size = (hi - lo).max_element().max(20.0);
+    let step = if size > 600.0 { 50.0 } else { 10.0 };
+    let margin = (size * 0.25).max(step);
+    let snap = |v: f32, up: bool| {
+        let s = if up { (v / step).ceil() } else { (v / step).floor() };
+        s as i32
+    };
+    (
+        snap(lo.x.min(0.0) - margin, false),
+        snap(lo.y.min(0.0) - margin, false),
+        snap(hi.x.max(0.0) + margin, true),
+        snap(hi.y.max(0.0) + margin, true),
+        step as i32,
+    )
+}
+
+/// A grid on the XY plane (10 mm squares, a stronger line every 50 mm) under the part,
+/// with the X, Y and Z axes in red, green and blue.
+pub fn make_grid(key: GridKey) -> Arc<MeshData> {
+    let step = key.4 as f32;
+    let (x0, y0, x1, y1) = (key.0 as f32 * step, key.1 as f32 * step, key.2 as f32 * step, key.3 as f32 * step);
+    let minor = [0.55, 0.58, 0.65, 0.16];
+    let major = [0.60, 0.63, 0.70, 0.32];
+    let mut lines = Vec::new();
+    let mut seg = |a: Vec3, b: Vec3, color: [f32; 4]| {
+        lines.push(LineVertex { position: a.into(), color });
+        lines.push(LineVertex { position: b.into(), color });
+    };
+    // A stronger line every 50 mm (or every 200 mm on the coarse grid).
+    let major_every = if step < 50.0 { 5 } else { 4 };
+    for i in key.0..=key.2 {
+        let x = i as f32 * step;
+        if i != 0 {
+            seg(vec3(x, y0, 0.0), vec3(x, y1, 0.0), if i % major_every == 0 { major } else { minor });
+        }
+    }
+    for j in key.1..=key.3 {
+        let y = j as f32 * step;
+        if j != 0 {
+            seg(vec3(x0, y, 0.0), vec3(x1, y, 0.0), if j % major_every == 0 { major } else { minor });
+        }
+    }
+    seg(vec3(x0, 0.0, 0.0), vec3(x1, 0.0, 0.0), [0.90, 0.30, 0.30, 0.7]); // X axis
+    seg(vec3(0.0, y0, 0.0), vec3(0.0, y1, 0.0), [0.35, 0.80, 0.35, 0.7]); // Y axis
+    let height = ((x1 - x0).max(y1 - y0) * 0.2).max(step);
+    seg(Vec3::ZERO, vec3(0.0, 0.0, height), [0.40, 0.55, 0.95, 0.7]); // Z axis
+    Arc::new(MeshData { id: next_mesh_id(), triangles: Vec::new(), lines })
 }

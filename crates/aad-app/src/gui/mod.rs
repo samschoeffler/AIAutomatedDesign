@@ -10,9 +10,10 @@
 //! you accept them.
 
 mod build;
+pub mod render;
 mod gpu;
 mod tree;
-mod viewer;
+pub mod viewer;
 
 use crate::control::{self, lock, Changes, Shared};
 use aad_model::{Design, Problem};

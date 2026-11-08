@@ -111,8 +111,8 @@ pub fn next_mesh_id() -> u64 {
     NEXT.fetch_add(1, Ordering::Relaxed)
 }
 
-/// Build one design (on the background thread).
-fn build(design: &Design) -> Result<Built, String> {
+/// Build one design into a mesh (on the background thread, or for the render tool).
+pub fn build(design: &Design) -> Result<Built, String> {
     if design.features.iter().all(|f| f.is_suppressed()) {
         return Ok(Built {
             mesh: Arc::new(MeshData { id: next_mesh_id(), ..Default::default() }),

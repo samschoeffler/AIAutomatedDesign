@@ -74,7 +74,7 @@ instead of a broken model.
 | `propose_features` | Claude proposes a full or partial feature list. It shows as a **ghost** in the app until you Accept or Reject. |
 | `proposal_status` | Whether you accepted, rejected or are still deciding. |
 | `measure` | Bounding box, volume, distances between named features. |
-| `render` | PNG of the part (iso, top, front, side) so Claude can check its work. |
+| `render` | PNG of the part (iso, top, front, right, or all four in one picture) so Claude can check its work. Shows a waiting proposal by default. |
 | `export` | STEP / STL / SVG to a path you allow. |
 
 ## The app window
@@ -92,9 +92,9 @@ instead of a broken model.
 
 1. **Model.** Feature list types, JSON load/save, validation. *(done for sketch / extrude / hole; other v1 feature types arrive with the phases that need them)*
 2. **Kernel.** Sketch → extrude/cut/hole with Truck; STL + STEP export. *(done: `aad-kernel`, `aad-export`; try it with `cargo run -p aad-export --example export -- examples/bracket.aad.json`)*
-3. **Bridge + control.** MCP stdio bridge, localhost protocol, propose/accept. *(done: `aad-link`, `aad-bridge`, and `aad-app` as a console app that asks you to accept or reject each proposal; `render` waits for phase 5. See "Trying the bridge" below)*
+3. **Bridge + control.** MCP stdio bridge, localhost protocol, propose/accept. *(done: `aad-link`, `aad-bridge`, and `aad-app` as a console app that asks you to accept or reject each proposal. See "Trying the bridge" below)*
 4. **Window.** Viewer, feature tree with number editing, ghost previews. *(done: eframe/egui window in `aad-app/src/gui`; the part is drawn with wgpu, builds run on a background thread, hand edits are saved and undoable. The console prompt still works beside it)*
-5. **Render tool.** Offscreen render to PNG for Claude.
+5. **Render tool.** Offscreen render to PNG for Claude. *(done: `aad-app/src/gui/render.rs` draws the window's scene off screen with its own GPU connection; the bridge sends it to Claude as an MCP image. Four views in one picture by default, a waiting proposal shown in blue)*
 6. **Robotics features.** Hole patterns, bearing and hex bores; SVG plate export.
 7. **Sketcher.** Interactive drawing + constraint solver. Biggest phase.
 
@@ -142,3 +142,7 @@ instead of a broken model.
 Proposals merge by feature id (same id replaces, new id is appended, `remove` deletes),
 or replace the whole list with `replace_all`. A proposal is validated and built before
 you see it, so a broken one goes straight back to Claude as an error.
+
+After rebuilding `aad-bridge`, run `/mcp` in Claude Code and reconnect `aad` so it starts the
+new bridge (a running bridge keeps the old tool list). Windows won't let the build replace a
+running `aad-bridge.exe`; rename it first (`aad-bridge.old.exe`) and the build writes a new one.
