@@ -56,7 +56,7 @@ pub struct Proposal {
     pub user_note: String,
 }
 
-/// Everything the app knows. Shared between the console and the bridge's connections.
+/// Everything the app knows. Shared between the window, the console and the bridge's connections.
 pub struct App {
     pub design: Design,
     /// Where accepted designs are saved. `None` means nothing is saved.
@@ -64,7 +64,18 @@ pub struct App {
     /// The only folder `export` writes to.
     pub export_dir: PathBuf,
     pub proposals: Vec<Proposal>,
+    /// Goes up by one every time `design` or a proposal changes, so the window knows to redraw.
+    pub revision: u64,
+    /// Earlier designs, newest last (for undo), and undone ones (for redo).
+    undo: Vec<Design>,
+    redo: Vec<Design>,
+    /// Called (without the lock held) when something changes from outside the window,
+    /// such as a new proposal, so the window can wake up and show it.
+    pub wake: Option<Arc<dyn Fn() + Send + Sync>>,
 }
+
+/// How many steps undo remembers.
+const UNDO_LIMIT: usize = 200;
 
 pub type Shared = Arc<Mutex<App>>;
 
@@ -76,7 +87,16 @@ pub fn lock(app: &Shared) -> MutexGuard<'_, App> {
 
 impl App {
     pub fn new(design: Design, file: Option<PathBuf>, export_dir: PathBuf) -> App {
-        App { design, file, export_dir, proposals: Vec::new() }
+        App {
+            design,
+            file,
+            export_dir,
+            proposals: Vec::new(),
+            revision: 0,
+            undo: Vec::new(),
+            redo: Vec::new(),
+            wake: None,
+        }
     }
 
     pub fn pending(&self) -> Option<&Proposal> {
@@ -87,15 +107,9 @@ impl App {
     pub fn accept(&mut self) -> Result<String, String> {
         let p = self.proposals.iter_mut().rev().find(|p| p.status == Status::Pending).ok_or("nothing to accept")?;
         p.status = Status::Accepted;
-        let id = p.id;
-        self.design = p.design.clone();
-        match &self.file {
-            Some(f) => {
-                self.design.save(f)?;
-                Ok(format!("accepted #{id}, saved to {}", f.display()))
-            }
-            None => Ok(format!("accepted #{id} (not saved: the app was started without a design file)")),
-        }
+        let (id, design) = (p.id, p.design.clone());
+        let saved = self.set_design(design)?;
+        Ok(format!("accepted #{id}{saved}"))
     }
 
     /// Reject the waiting proposal. `note` is passed back to Claude.
@@ -103,7 +117,83 @@ impl App {
         let p = self.proposals.iter_mut().rev().find(|p| p.status == Status::Pending).ok_or("nothing to reject")?;
         p.status = Status::Rejected;
         p.user_note = note.to_string();
-        Ok(format!("rejected #{}", p.id))
+        let id = p.id;
+        self.revision += 1;
+        Ok(format!("rejected #{id}"))
+    }
+
+    /// The user changed the design by hand (in the window). A proposal still waiting was
+    /// made for the old design, so it's withdrawn and Claude is told why.
+    pub fn edit(&mut self, design: Design) -> Result<String, String> {
+        if design == self.design {
+            return Ok(String::new());
+        }
+        for p in self.proposals.iter_mut().filter(|p| p.status == Status::Pending) {
+            p.status = Status::Superseded;
+            p.user_note = "the user changed the design by hand; call get_design and propose again".into();
+        }
+        let saved = self.set_design(design)?;
+        Ok(format!("edited{saved}"))
+    }
+
+    /// Go back one step. Returns false if there's nothing to undo.
+    pub fn undo(&mut self) -> Result<bool, String> {
+        let Some(previous) = self.undo.pop() else { return Ok(false) };
+        let current = std::mem::replace(&mut self.design, previous);
+        self.redo.push(current);
+        self.after_change()?;
+        Ok(true)
+    }
+
+    /// Redo a step that was undone. Returns false if there's nothing to redo.
+    pub fn redo(&mut self) -> Result<bool, String> {
+        let Some(next) = self.redo.pop() else { return Ok(false) };
+        let current = std::mem::replace(&mut self.design, next);
+        self.undo.push(current);
+        self.after_change()?;
+        Ok(true)
+    }
+
+    pub fn can_undo(&self) -> bool {
+        !self.undo.is_empty()
+    }
+
+    pub fn can_redo(&self) -> bool {
+        !self.redo.is_empty()
+    }
+
+    /// Replace the design, remembering the old one for undo. Returns ", saved to …" or a
+    /// note that nothing was saved, for messages.
+    fn set_design(&mut self, design: Design) -> Result<String, String> {
+        let old = std::mem::replace(&mut self.design, design);
+        self.undo.push(old);
+        if self.undo.len() > UNDO_LIMIT {
+            self.undo.remove(0);
+        }
+        self.redo.clear();
+        self.after_change()
+    }
+
+    /// Save (if there's a file) and tell the window.
+    fn after_change(&mut self) -> Result<String, String> {
+        self.revision += 1;
+        match &self.file {
+            Some(f) => {
+                self.design.save(f)?;
+                Ok(format!(", saved to {}", f.display()))
+            }
+            None => Ok(" (not saved: the app was started without a design file)".into()),
+        }
+    }
+
+    /// Tell the window something changed. Call this after letting go of the lock.
+    pub fn waker(&self) -> impl FnOnce() {
+        let wake = self.wake.clone();
+        move || {
+            if let Some(wake) = wake {
+                wake();
+            }
+        }
     }
 }
 
@@ -271,15 +361,18 @@ fn propose(app: &Shared, args: ProposeArgs) -> Result<Value, String> {
     };
     text.push_str(&describe_proposal(&proposal));
     a.proposals.push(proposal);
+    a.revision += 1;
+    let wake = a.waker();
     // Never print while holding the lock (see say.rs).
     drop(a);
     say(text);
+    wake();
     Ok(json!({
         "proposal_id": id,
         "status": Status::Pending,
         "changes": changes,
         "measurements": measurements,
-        "next": "The user accepts or rejects this in the AiAidedDesign console. \
+        "next": "The user sees it in the AiAidedDesign window and accepts or rejects it. \
                  Call proposal_status with wait_seconds to hear back.",
     }))
 }
@@ -300,13 +393,19 @@ fn describe_proposal(p: &Proposal) -> String {
     if p.changes.renamed {
         t.push_str(&format!("   new name: {:?}\n", p.design.name));
     }
-    if let Some(size) = p.measurements["bounding_box_mm"]["size"].as_array() {
-        let s: Vec<String> = size.iter().map(|v| format!("{:.1}", v.as_f64().unwrap_or(0.0))).collect();
-        let volume = p.measurements["volume_mm3"].as_f64().unwrap_or(0.0);
-        t.push_str(&format!("   size {} mm, volume {volume:.0} mm³\n", s.join(" x ")));
+    if let Some(size) = size_text(&p.measurements) {
+        t.push_str(&format!("   size {size}\n"));
     }
-    t.push_str("   [a]ccept / [r]eject (add a reason for Claude: r too thin)\n> ");
+    t.push_str("   accept or reject it in the window (or type a / r here)\n> ");
     t
+}
+
+/// The size line shown for a proposal, like "100.0 x 50.0 x 6.0 mm, 29212 mm³".
+pub fn size_text(measurements: &Value) -> Option<String> {
+    let size = measurements["bounding_box_mm"]["size"].as_array()?;
+    let s: Vec<String> = size.iter().map(|v| format!("{:.1}", v.as_f64().unwrap_or(0.0))).collect();
+    let volume = measurements["volume_mm3"].as_f64().unwrap_or(0.0);
+    Some(format!("{} mm, {volume:.0} mm³", s.join(" x ")))
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -552,6 +651,39 @@ mod tests {
         let path = PathBuf::from(reply["path"].as_str().expect("path"));
         assert!(path.exists());
         std::fs::remove_file(path).expect("cleans up");
+    }
+
+    #[test]
+    fn hand_edits_withdraw_a_waiting_proposal_and_can_be_undone() {
+        let app = shared(plate());
+        handle(&app, "propose_features", json!({ "name": "Claude's name" })).expect("ok");
+        let mut renamed = plate();
+        renamed.name = "Mine".into();
+        lock(&app).edit(renamed).expect("edits");
+
+        let s = handle(&app, "proposal_status", Value::Null).expect("ok");
+        assert_eq!(s["status"], "superseded");
+        assert!(s["user_note"].as_str().expect("note").contains("by hand"));
+        assert!(lock(&app).accept().is_err(), "the withdrawn proposal can't be accepted");
+
+        let mut a = lock(&app);
+        assert!(a.undo().expect("undoes"));
+        assert_eq!(a.design.name, "Plate");
+        assert!(!a.undo().expect("nothing left"));
+        assert!(a.redo().expect("redoes"));
+        assert_eq!(a.design.name, "Mine");
+    }
+
+    #[test]
+    fn accepting_can_be_undone_and_bumps_the_revision() {
+        let app = shared(plate());
+        handle(&app, "propose_features", json!({ "name": "B" })).expect("ok");
+        let before = lock(&app).revision;
+        lock(&app).accept().expect("accepts");
+        let mut a = lock(&app);
+        assert!(a.revision > before);
+        a.undo().expect("undoes");
+        assert_eq!(a.design.name, "Plate");
     }
 
     #[test]

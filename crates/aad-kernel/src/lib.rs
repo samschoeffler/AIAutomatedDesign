@@ -23,8 +23,8 @@
 
 use aad_model::{BodyOp, Design, Feature, HoleDepth, Plane, SketchEntity};
 use std::collections::HashMap;
-use truck_meshalgo::prelude::{CalcVolume, MeshableShape, MeshedShape, PolygonMesh};
-use truck_modeling::{builder, EuclideanSpace, Rad, Vector3, Wire};
+use truck_meshalgo::prelude::{CalcVolume, MeshableShape, MeshedShape, PolygonMesh, PolylineCurve};
+use truck_modeling::{builder, EuclideanSpace, InnerSpace, Rad, Vector3, Wire};
 
 pub use truck_modeling::{Point3, Solid};
 
@@ -89,6 +89,64 @@ impl Part {
         all
     }
 
+    /// Triangles and edges for drawing the part on screen (the app's 3D viewer).
+    pub fn display_mesh(&self) -> DisplayMesh {
+        let mut out = DisplayMesh::default();
+        for solid in self.solids() {
+            let meshed = solid.triangulation(MESH_TOLERANCE);
+
+            // Edges are drawn only where there's a real corner. Where two faces meet smoothly
+            // (a hole's wall is made of several curved faces, or one that meets itself at a
+            // seam) there's no visible edge, so none is drawn.
+            let faces: Vec<_> = meshed.face_iter().collect();
+            let mut edge_faces: HashMap<_, Vec<usize>> = HashMap::new();
+            for (i, face) in faces.iter().enumerate() {
+                for edge in face.boundaries().iter().flat_map(|w| w.edge_iter()) {
+                    edge_faces.entry(edge.id()).or_default().push(i);
+                }
+            }
+            let is_smooth = |edge: &truck_topology::Edge<Point3, PolylineCurve<Point3>>| {
+                let curve = edge.curve();
+                let Some(&p) = curve.get(curve.len() / 2) else { return false };
+                let normals: Option<Vec<Vector3>> = edge_faces
+                    .get(&edge.id())
+                    .map(|fs| fs.iter().map(|&i| face_normal_at(faces[i], p)).collect::<Option<_>>())
+                    .unwrap_or(None);
+                match normals.as_deref() {
+                    Some([a, b]) => a.dot(*b) > SMOOTH_COS,
+                    _ => false, // unsure: draw it
+                }
+            };
+            // Each edge belongs to two faces, so skip repeats.
+            let mut seen = std::collections::HashSet::new();
+            for edge in meshed.edge_iter() {
+                if seen.insert(edge.id()) && !is_smooth(&edge) {
+                    let line: Vec<[f32; 3]> = edge.curve().iter().map(|p| to_f32(*p)).collect();
+                    if line.len() >= 2 {
+                        out.edges.push(line);
+                    }
+                }
+            }
+
+            // Triangles, with the surface normal at each corner where the mesh has one.
+            let mesh = meshed.to_polygon();
+            let (positions, normals) = (mesh.positions(), mesh.normals());
+            for tri in mesh.faces().triangle_iter() {
+                let p = tri.map(|v| positions[v.pos]);
+                let flat = (p[1] - p[0]).cross(p[2] - p[0]);
+                let flat = if flat.magnitude2() > 0.0 { flat.normalize() } else { Vector3::unit_z() };
+                out.triangles.push(std::array::from_fn(|i| Corner {
+                    position: to_f32(p[i]),
+                    normal: {
+                        let n = tri[i].nor.map_or(flat, |n| normals[n]);
+                        [n.x as f32, n.y as f32, n.z as f32]
+                    },
+                }));
+            }
+        }
+        out
+    }
+
     /// Volume in mm³, from the mesh (so very slightly under for curved faces).
     pub fn volume(&self) -> f64 {
         self.mesh().volume()
@@ -99,6 +157,47 @@ impl Part {
         let bb = self.mesh().bounding_box();
         (!bb.is_empty()).then(|| (bb.min(), bb.max()))
     }
+}
+
+/// What the viewer draws: see [`Part::display_mesh`]. Sizes in mm, as `f32` for the GPU.
+#[derive(Debug, Clone, Default)]
+pub struct DisplayMesh {
+    /// Three corners per triangle, counter-clockwise when seen from outside the part.
+    pub triangles: Vec<[Corner; 3]>,
+    /// The part's real edges (where two faces meet), each as a line through these points.
+    pub edges: Vec<Vec<[f32; 3]>>,
+}
+
+/// One corner of a display triangle.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Corner {
+    pub position: [f32; 3],
+    /// Points out of the part, length 1.
+    pub normal: [f32; 3],
+}
+
+/// Faces meeting at less than this angle (cosine of 20°) count as smooth: no edge drawn.
+const SMOOTH_COS: f64 = 0.94;
+
+/// The outward normal of a meshed face at one of its mesh points, if `p` is one.
+fn face_normal_at(face: &truck_topology::Face<Point3, PolylineCurve<Point3>, Option<PolygonMesh>>, p: Point3) -> Option<Vector3> {
+    let mesh = face.surface()?;
+    let (positions, normals) = (mesh.positions(), mesh.normals());
+    let tri = mesh.faces().triangle_iter().find(|t| t.iter().any(|v| (positions[v.pos] - p).magnitude2() < 1e-10))?;
+    let corner = tri.iter().find(|v| (positions[v.pos] - p).magnitude2() < 1e-10)?;
+    let n = match corner.nor {
+        Some(n) => normals[n],
+        None => {
+            let q = tri.map(|v| positions[v.pos]);
+            (q[1] - q[0]).cross(q[2] - q[0]).normalize()
+        }
+    };
+    // A face used back to front has its mesh the wrong way round.
+    Some(if face.orientation() { n } else { -n })
+}
+
+fn to_f32(p: Point3) -> [f32; 3] {
+    [p.x as f32, p.y as f32, p.z as f32]
 }
 
 /// Why a design couldn't be built, worded so Claude can fix it.

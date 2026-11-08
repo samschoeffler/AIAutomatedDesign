@@ -3,7 +3,7 @@ name = "aad-app"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
-description = "The AiAidedDesign app: holds the design and takes Claude's proposals (window comes in phase 4)."
+description = "The AiAidedDesign app: a window with the 3D part, the feature list and Claude's proposals."
 
 [[bin]]
 name = "AiAidedDesign"
@@ -16,3 +16,9 @@ aad-export = { path = "../aad-export" }
 aad-link = { path = "../aad-link" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# The window: eframe runs egui (buttons, panels) on wgpu (the GPU), which also draws the part.
+eframe = "0.37"
+# Lets us copy vertex structs straight into GPU buffers.
+bytemuck = { version = "1.25", features = ["derive"] }
+# Vectors and matrices for the 3D camera.
+glam = "0.34"

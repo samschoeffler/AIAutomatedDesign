@@ -93,7 +93,7 @@ instead of a broken model.
 1. **Model.** Feature list types, JSON load/save, validation. *(done for sketch / extrude / hole; other v1 feature types arrive with the phases that need them)*
 2. **Kernel.** Sketch → extrude/cut/hole with Truck; STL + STEP export. *(done: `aad-kernel`, `aad-export`; try it with `cargo run -p aad-export --example export -- examples/bracket.aad.json`)*
 3. **Bridge + control.** MCP stdio bridge, localhost protocol, propose/accept. *(done: `aad-link`, `aad-bridge`, and `aad-app` as a console app that asks you to accept or reject each proposal; `render` waits for phase 5. See "Trying the bridge" below)*
-4. **Window.** Viewer, feature tree with number editing, ghost previews.
+4. **Window.** Viewer, feature tree with number editing, ghost previews. *(done: eframe/egui window in `aad-app/src/gui`; the part is drawn with wgpu, builds run on a background thread, hand edits are saved and undoable. The console prompt still works beside it)*
 5. **Render tool.** Offscreen render to PNG for Claude.
 6. **Robotics features.** Hole patterns, bearing and hex bores; SVG plate export.
 7. **Sketcher.** Interactive drawing + constraint solver. Biggest phase.
@@ -106,8 +106,7 @@ instead of a broken model.
 - **Localhost security:** *settled in phase 3.* The app writes its port and a random
   token to `%LOCALAPPDATA%\AiAidedDesign\session.json`; requests without the token
   are refused, so only the bridge (running as you) can drive the app.
-- **Ghost previews** for edits that change existing features: show the before
-  and after, or only the after?
+- **Ghost previews:** *settled in phase 4.* All three, switchable in the proposal bar: the proposed part (blue) with the current part's edges in orange, the current part alone, or the current part with the proposal see-through over it.
 - **Hole sizes:** which clearance table for M3/M4/M5 and #10 / 1/4 in screws?
 - **Hex bore tolerance** for 1/2 in hex shaft (printed vs machined)?
 - **Joins that Truck can't fuse.** Truck's booleans fail on shared flat faces, and
@@ -135,8 +134,9 @@ instead of a broken model.
    `claude mcp add aad -- C:\Users\pizza\AIAutomatedDesign\target\debug\aad-bridge.exe`
 3. Start the app on a design file (it's created on the first accept if it doesn't exist):
    `cargo run -p aad-app -- my_part.aad.json`
-4. Ask Claude for a part. Each change shows up in the app's console; type `a` to
-   accept or `r <reason>` to reject. Accepted changes are saved to the design file,
+4. Ask Claude for a part. Each change shows up in the app window as a blue preview with
+   Accept / Reject buttons (a reason typed next to Reject goes back to Claude); the console
+   still takes `a` and `r <reason>`. Accepted changes are saved to the design file,
    and exports go into the same folder.
 
 Proposals merge by feature id (same id replaces, new id is appended, `remove` deletes),

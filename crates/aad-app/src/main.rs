@@ -1,11 +1,13 @@
-//! The AiAidedDesign app. For now (phase 3, docs/SPEC.md) it runs in a console: it holds
-//! the design, lets Claude reach it through aad-bridge, and asks you to accept or reject
-//! each change Claude proposes. The window comes in phase 4.
+//! The AiAidedDesign app: it holds the design, lets Claude reach it through aad-bridge,
+//! and shows it in a window (docs/SPEC.md, phase 4): the 3D part, the feature list with
+//! editable numbers, and Claude's proposals to accept or reject. The console window that
+//! comes with it shows a log, and still takes the old typed commands (a / r / show).
 //!
 //! Try it: `cargo run -p aad-app -- examples/hinge_leaf.aad.json`
-//! (a file that doesn't exist yet starts an empty design, saved there on the first accept).
+//! (a file that doesn't exist yet starts an empty design, saved there on the first change).
 
 mod control;
+mod gui;
 mod say;
 
 use aad_model::Design;
@@ -63,16 +65,19 @@ fn run() -> Result<(), String> {
             None => println!("no design file given: accepted changes won't be saved"),
         }
     }
-    println!("waiting for Claude (type help for commands)");
+    println!("waiting for Claude (type help here for console commands)");
     let old_mode = disable_quick_edit();
-    console(&app);
+    // The console prompt runs beside the window; when the window closes, the app ends.
+    let for_console = app.clone();
+    std::thread::spawn(move || console(&for_console));
+    let shown = gui::run(app.clone());
     restore_console_mode(old_mode);
 
     // Tidy up, unless a newer app has taken over the session file.
     if aad_link::Session::read(&session_file).is_ok_and(|s| s == session) {
         let _ = std::fs::remove_file(&session_file);
     }
-    Ok(())
+    shown
 }
 
 fn empty_design(name: &str) -> Design {
@@ -89,7 +94,7 @@ const HELP: &str = "\
   a, accept         accept Claude's proposal
   r, reject [why]   reject it (the reason is passed back to Claude)
   show              list the design's features
-  quit              close the app";
+  (close the window to quit)";
 
 /// Read your commands until you quit (or the console closes).
 fn console(app: &Shared) {
@@ -97,18 +102,19 @@ fn console(app: &Shared) {
         let Ok(line) = line else { break };
         let line = line.trim();
         let (cmd, rest) = line.split_once(' ').unwrap_or((line, ""));
-        let outcome = {
+        let (outcome, wake) = {
             let mut a = lock(app);
-            match cmd {
+            let outcome = match cmd {
                 "" => continue,
                 "a" | "accept" => a.accept(),
                 "r" | "reject" => a.reject(rest.trim()),
                 "show" => Ok(describe(&a.design)),
                 "help" | "?" => Ok(HELP.to_string()),
-                "q" | "quit" | "exit" => break,
                 other => Err(format!("unknown command {other:?} (type help)")),
-            }
-        }; // lock released here, before printing
+            };
+            (outcome, a.waker())
+        }; // lock released here, before printing and waking the window
+        wake();
         match outcome {
             Ok(msg) => say_line(msg),
             Err(e) => say_line(e),

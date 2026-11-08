@@ -213,3 +213,43 @@ fn invalid_designs_are_refused_with_the_validation_message() {
     assert_eq!(err.feature, "e1");
     assert!(err.message.contains("nope"), "{err}");
 }
+
+#[test]
+fn the_display_mesh_has_the_real_edges_and_outward_normals() {
+    let mesh = built(PLATE).display_mesh();
+    assert_eq!(mesh.edges.len(), 12, "a box has 12 edges");
+    assert_eq!(mesh.triangles.len(), 12, "two triangles per face");
+    let centre = [20.0f32, 50.0, 1.5];
+    for tri in &mesh.triangles {
+        for c in tri {
+            let out: f32 = (0..3).map(|k| (c.position[k] - centre[k]) * c.normal[k]).sum();
+            assert!(out > 0.0, "normal {:?} at {:?} points inwards", c.normal, c.position);
+        }
+    }
+}
+
+#[test]
+fn hole_seams_are_not_drawn_as_edges() {
+    let mut f = PLATE.to_string();
+    f.push_str(r#", { "id": "h1", "type": "hole", "on": "e1", "diameter": 6, "at": [[20, 50]] }"#);
+    // 12 box edges + a circle on the top and bottom face (each maybe split in a few arcs),
+    // but no straight seam running down the hole's wall.
+    let mesh = built(&f).display_mesh();
+    for line in &mesh.edges {
+        let vertical = line.iter().all(|p| (p[0] - line[0][0]).abs() < 1e-3 && (p[1] - line[0][1]).abs() < 1e-3);
+        let in_hole = ((line[0][0] - 20.0).powi(2) + (line[0][1] - 50.0).powi(2)).sqrt() < 3.5;
+        assert!(!(vertical && in_hole), "a seam is drawn: {line:?}");
+    }
+}
+
+#[test]
+fn hole_rims_are_drawn() {
+    let mut f = PLATE.to_string();
+    f.push_str(r#", { "id": "h1", "type": "hole", "on": "e1", "diameter": 6, "at": [[20, 50]] }"#);
+    let mesh = built(&f).display_mesh();
+    let near_hole = |p: &[f32; 3]| ((p[0] - 20.0).powi(2) + (p[1] - 50.0).powi(2)).sqrt() < 3.5;
+    let rim_points: Vec<_> = mesh.edges.iter().flatten().filter(|p| near_hole(p)).collect();
+    assert!(rim_points.iter().any(|p| p[2] > 2.9), "no rim edge on the top face: {} edges", mesh.edges.len());
+    assert!(rim_points.iter().any(|p| p[2] < 0.1), "no rim edge on the bottom face");
+}
+

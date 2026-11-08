@@ -10,3 +10,5 @@ aad-model = { path = "../aad-model" }
 truck-modeling = "0.6"
 truck-shapeops = "0.4"
 truck-meshalgo = "0.4"
+# Faces and edges of a meshed solid, for the viewer's edge lines.
+truck-topology = "0.6"
